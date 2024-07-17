@@ -258,7 +258,7 @@ if __name__ == "__main__":
 # Ok on Bauhaus std medium
 # Ok on Bernhard Modern std roman
 # Ok on Avenir lt std
-# Bad on Bookman std medium
+# Good on Bookman std medium
 
 
 # future idea: what if identifying color hexcodes lol
