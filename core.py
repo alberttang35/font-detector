@@ -13,16 +13,20 @@ from collections import defaultdict
 pytesseract.pytesseract.tesseract_cmd = '/opt/homebrew/bin/tesseract'
 
 # Next steps:
-# adaptability to different font sizes and spacing
 # Use GCP to train on more than 20 fonts
 # Improved usability
 
 parser = argparse.ArgumentParser()
-parser.add_argument("-d", action='store_true')
-parser.add_argument("-l", action='store_true')
-parser.add_argument("-t", action="store_true")
+parser.add_argument("-d", action='store_true', help="Dark mode. Use for light text on dark background")
+parser.add_argument("-v", "--verbose", action='store_true')
+parser.add_argument("--filepath", type=str, default=None, help="Filepath to detect fonts. If none provided you will be prompted to take a picture")
+parser.add_argument("--top", type=int, default=3, help="Number of predictions to consider for each crop")
+parser.add_argument("--model", choices=['TFLite', 'Compact', 'Full'], default='Compact')
+parser.add_argument("--border", choices=['b', 'w', None], default=None)
 args = parser.parse_args()
 
+# verbose = False
+split = args.top
 dark_mode = args.d
 
 # # from opencv docs, gaussian filtering can help w thresholding
@@ -30,8 +34,6 @@ dark_mode = args.d
 # # need some way to switch between dark/light mode
 # # blur = cv.GaussianBlur(
 # #     gray, (5,5), 0)
-# # cv.imshow("blur", blur)
-# # cv.waitKey(0)
 
 # # Currently doing poorly on dynamic backgrounds, maybe need to look for gradients 
 # # OR adaptive method
@@ -60,12 +62,6 @@ dark_mode = args.d
 # contours, hierarchy = cv.findContours(dilation, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE)
 
 
-def pad_img(img):
-    pad = [0,0,0] if dark_mode else [255,255,255]
-    img = cv.copyMakeBorder(img, 15, 15, 15, 15, cv.BORDER_CONSTANT, value=pad)
-    return img
-
-
 def zoom_at(img, zoom=1, angle=0, coord=None):
     cy, cx = [ i/2 for i in img.shape[:] ] if coord is None else coord[::-1]
     
@@ -74,37 +70,28 @@ def zoom_at(img, zoom=1, angle=0, coord=None):
     
     return result
 
-
-
-    # Kaggle is really limiting my productivity, might be worth switching to gcp
-    
-    # use different config flags to search for words, single chars, etc
-    # defaultConfig = "--psm 6"
-    # singleConfig = "--psm 10" # Treat the image as a single character
-    # autoConfig = "--psm 3" # "Fully automatic page segmentation, but no OSD"
-    # sparseConfig = "--psm 12"
     
     # text = pytesseract.image_to_string(cropped, config=sparseConfig)
-
     # could use tesseract to read the text, and then display the text in each of the top fonts
 
 
 def resize_image(img, image_dimension):
-    """ Input: Image Path
+    """ Input: Image, image_dimension
     	Output: Image
-    	Resizes image to height of 96px, while maintaining aspect ratio
+    	Resizes image to height of image_dimension, while maintaining aspect ratio
     """
     base_height = image_dimension
     height_percent = (base_height/float(img.size[1]))
     wsize = int((float(img.size[0])*float(height_percent)))
-    # print("Width", wsize)
     img = img.resize((wsize, base_height), Image.LANCZOS)
 
     return img
 
 
-def get_screenshot():
-    # sometimes the mouseclick down doesnt get recorded
+def get_screenshot() -> np.ndarray:
+    '''
+    Take a screenshot to infer fonts
+    '''
     top = 0
     left = 0
     width = 0
@@ -133,31 +120,74 @@ def get_screenshot():
                     sct_img = sct.grab(monitor)
                     img = np.array(sct_img)
                     cv.imshow("Look good?", img)
+                    print("Press y to confirm this capture. Press any other button to retake")
                     key = cv.waitKey(0)
-                    # print(key)
                     cv.destroyAllWindows()
+                    cv.waitKey(1)
                     if key == ord('y'):
                         return img
-                    return img
+                    # return img
+            
+def get_preds(squares, model):
+    '''
+    Get the model's predictions for each crop
+    '''
+    if model:
+        out = model.call(np.array(squares))
+        total = np.sum(out, axis=0)
+        return total
+    else:
+        # use the tflite model
+        interpreter = tf.lite.Interpreter(model_path="weights/model.tflite")
+        interpreter.allocate_tensors()
+
+        input_details = interpreter.get_input_details()
+        output_details = interpreter.get_output_details()
+        input_shape = input_details[0]['shape']
+        input_data = np.array(np.random.random_sample(input_shape), dtype=np.float32)
+        interpreter.set_tensor(input_details[0]['index'], input_data)
+        interpreter.invoke()
+        output_data = interpreter.get_tensor(output_details[0]['index'])
+        
+        out = []
+        for crop in squares:
+            interpreter.set_tensor(input_details[0]['index'], np.array(crop, dtype=np.float32).reshape(1, 96, 96))
+
+            interpreter.invoke()
+
+            output_data = interpreter.get_tensor(output_details[0]['index'])
+            out.append(output_data[0])
+
+        total=np.sum(np.array(out), axis=0)
+        return total
+
 
 def get_top_5(img, model):
+    '''
+    Processes img and gets the model's top five predictions for its font
+    '''
     altered = alter_image(img)
     resized = resize_image(altered, 96)
     squares = generate_crop(resized, 96, 5) 
     if len(squares) == 0:
         return []
-    out = model.call(np.array(squares))
-    total = np.sum(out, axis=0)
-
-    # preds = np.argpartition(-total, 5)[:5]
-    preds = np.argpartition(-total, 3)[:3]
+    
+    total = get_preds(squares, model)
+    
+    preds = np.argpartition(-total, split)[:split]
 
     return preds
 
-
-# having the tesseract option isnt a great solution, still need to make the choice
 def tess_boxes(img):
+    '''
+    Use tesseractOCR to detect bounding boxes for each word
+    '''
+    activation = cv.THRESH_BINARY if dark_mode else cv.THRESH_BINARY_INV
+    ret, thresh1 = cv.threshold(img, 0, 255, cv.THRESH_OTSU | activation)
+    cv.imshow("thresh1", thresh1)
+    cv.waitKey(0)
     d = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT, config="--psm 11")
+    # print(d)
     n_boxes = len(d['level'])
     boxes = []
     for i in range(n_boxes):
@@ -166,16 +196,23 @@ def tess_boxes(img):
             continue
         x, y, w, h = d['left'][i], d['top'][i], d['width'][i], d['height'][i]
         boxes.append((x, y, w, h))
-
+    #     cv.rectangle(img, (x, y), (x + w, y + h), (0,255,0), 2)
+    # cv.imshow("boxes", img)
+    # cv.waitKey(0)
     return boxes
 
 def dilate_boxes(img):
-    gray = cv.cvtColor(img, cv.COLOR_BGR2GRAY)
+    '''
+    Use openCV to find bounding boxes for each word
+    '''
     dark_mode = args.d
     activation = cv.THRESH_BINARY if dark_mode else cv.THRESH_BINARY_INV
-    ret, thresh1 = cv.threshold(gray, 0, 255, cv.THRESH_OTSU | activation)
 
-    rect_kernel = cv.getStructuringElement(cv.MORPH_RECT, (15, 11)) 
+    ret, thresh1 = cv.threshold(img, 0, 255, cv.THRESH_OTSU | activation)
+    cv.imshow("thresh", thresh1)
+    cv.waitKey(0)
+    kernel_shape = (15, 11)
+    rect_kernel = cv.getStructuringElement(cv.MORPH_RECT, kernel_shape) 
 
     dilation = cv.dilate(thresh1, rect_kernel, iterations=1)
 
@@ -187,33 +224,47 @@ def dilate_boxes(img):
     return boxes
 
 def use_model(model, get_bounds, filepath=None, repeat=1):
+    '''
+    Run the font inferrence model
+    '''
     if filepath:
         img = cv.imread(filepath)
     else:
         img = get_screenshot()
-    contours = get_bounds(img)
-    # lower contrast colors are a bit problematic
-    gray = cv.cvtColor(img, cv.COLOR_BGR2GRAY)
+    
 
-    im2 = gray.copy()
+    # doesnt work too well on mixed background
+    
+    # One idea for dealing with concentric bg
+    gray = cv.cvtColor(img, cv.COLOR_BGR2GRAY)
+    if args.border:
+        fill = 0 if args.border == 'w' else 255
+        _, gray, _, _ = cv.floodFill(gray, None, (0,0), fill)
+
+    contours = get_bounds(gray)
+
+    # Thresholding helps with non-black/white font colors
+    activation = cv.THRESH_BINARY_INV if dark_mode else cv.THRESH_BINARY # This gets black text on white bg
+    ret, thresh1 = cv.threshold(gray, 0, 255, cv.THRESH_OTSU | activation) # does the model care if its white text or black text?
+
+    im2 = thresh1.copy()
 
     f = open('150_fonts_backwards.json')
     data = json.load(f)
     for x, y, w, h in contours:
         counts = defaultdict(int)
-        # x, y, w, h = cv.boundingRect(cnt)
 
-        cropped = im2[y:y + h, x:x + w] # can use the dimensions of cropped to figure out how much zoom is necessary
-        cv.imshow("cropped", cropped)
-        cv.waitKey(0)
+        cropped = im2[y:y + h, x:x + w] 
 
-        y_ratio = min(h / 96, 1)
-        x_ratio = min(w / 96, 1)
+        if args.verbose:
+            cv.imshow("crop", cropped)
+            cv.waitKey(100)
 
-        # might need to get crops here? could average from a couple crops
+        y_ratio = h / 96
+        x_ratio = w / 96
+
         pil = Image.fromarray(cropped)
         if x_ratio < 1 or y_ratio < 1:
-            # pil = pad_img(cropped)
             pil = resize_image(pil, 96)
 
         for _ in range(repeat):
@@ -227,38 +278,28 @@ def use_model(model, get_bounds, filepath=None, repeat=1):
 
 
 def main():
-    model = DeepFont()
+    if args.model == 'Full':
+        model = DeepFont(512)
+        model.call(np.ones((1,96,96,1)))
+        model.load_weights("weights/model_weights_20_40epochs.weights.h5")
+        model.call(np.ones((1,96,96,1)))
+    elif args.model == 'Compact':
+        model = DeepFont(128)
+        model.call(np.ones((1,96,96,1)))
+        model.load_weights("weights/model_weights_20_compact.weights.h5")
+        model.call(np.ones((1,96,96,1)))
+    else:
+        model = None # this will activate the TFLite model
+    
 
-    # call model to initialize weights
-    model.call(np.ones((1,96,96,1)))
-    # model.load_weights("weights/model_weights_20_leaky.weights.h5")
-    model.load_weights("weights/model_weights_20_40epochs.weights.h5")
-
-    print(np.argmax(model.call(np.ones((1,96,96,1))), axis=1))
-
-    use_model(model, get_bounds=tess_boxes, repeat=10)
-    filepath = "data/briem_space.png"
-    # use_model(model, get_bounds=tess_boxes, filepath=filepath, repeat=100)
-
-    # tesseract is adaptable, but it tends to draw too many boxes
-    # img = cv.imread("data/briem_space.png")
-    # img = cv.imread("data/antiqueOlive_close.png")
-    # tess_boxes(img)
+    filepath = args.filepath
+    
+    use_model(model, get_bounds=tess_boxes, filepath=filepath, repeat=100)
     
 
 if __name__ == "__main__":
     main()
 
-
-# Testing using top 3:
-# Didn't perform well on baskerville cyrillic LT std
-# Good on Americana std
-# Ok on Arno pro
-# Ok on Jenson pro
-# Ok on Bauhaus std medium
-# Ok on Bernhard Modern std roman
-# Ok on Avenir lt std
-# Good on Bookman std medium
 
 
 # future idea: what if identifying color hexcodes lol

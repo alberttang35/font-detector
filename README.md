@@ -15,3 +15,9 @@ Single character images here[https://huggingface.co/datasets/rcugarte/font_train
 Natural text from ?
 
 ## Font detection
+
+## How to
+
+install pytesseract
+
+`pip install pytesseract`

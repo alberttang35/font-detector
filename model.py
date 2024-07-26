@@ -14,6 +14,7 @@ import argparse
 import keras
 
 
+
 # parser = argparse.ArgumentParser()
 # parser.add_argument("--restore-checkpoint", dest="restore", action='store_true')
 # parser.add_argument("--mode", dest="mode", type=str, default="train")
@@ -30,11 +31,12 @@ import keras
 performance_dict = {}
 
 class DeepFont(Model):
-    def __init__(self):
+    def __init__(self, dense=128):
         super(DeepFont, self).__init__()
 
         self.batch_size = 128
         self.num_classes = 20
+        self.leaky_relu = tf.keras.layers.LeakyReLU(negative_slope=0.2)
 
         self.model = tf.keras.Sequential()
         # C_u from Deepfont
@@ -48,14 +50,13 @@ class DeepFont(Model):
         self.model.add(tf.keras.layers.MaxPooling2D(pool_size=(2,2), strides=None, padding='same'))
 
         # C_s from Deepfont
-        # Paper implies being able to reuse C_u, how would this work
         self.model.add(tf.keras.layers.Conv2D(256, kernel_size=(3,3), strides=(1,1), padding='same'))
         self.model.add(tf.keras.layers.Conv2D(256, kernel_size=(3,3), strides=(1,1), padding='same'))
         self.model.add(tf.keras.layers.Conv2D(256, kernel_size=(3,3), strides=(1,1), padding='same'))
 
         self.model.add(tf.keras.layers.Flatten())
-        self.model.add(tf.keras.layers.Dense(512, activation='relu'))
-        self.model.add(tf.keras.layers.Dense(512, activation='relu'))
+        self.model.add(tf.keras.layers.Dense(dense, activation=self.leaky_relu)) # 512
+        self.model.add(tf.keras.layers.Dense(dense, activation=self.leaky_relu)) # 512
         self.model.add(tf.keras.layers.Dense(self.num_classes, activation='softmax')) 
 
         # self.optimizer = tf.keras.optimizers.Adam(learning_rate=0.001) # learning_rate = 0.01
@@ -178,3 +179,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
