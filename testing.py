@@ -1,192 +1,192 @@
+import multiprocessing.queues
+from typing import List
 import numpy as np
 from PIL import Image
 import cv2 as cv
-import random
-from process_vfr import *
 import json
-import requests
-import h5py
-from model import *
-import pytesseract
-from multiprocessing import Process, Pool, Queue
+import multiprocessing
 import time
 import websocket
 import base64
 import io
-import hashlib
-from threading import Thread
+import argparse
+
+# TODO: make experience with camera more smooth, maybe see the frame sent to gpt
+# TODO: is this good separation of concerns?
+
+parser = argparse.ArgumentParser()
+parser.add_argument('-s', action='store_true', help='If present, images are streamed to ChatGPT for inference')
+parser.add_argument('--query', '-q', help='USAGE: --query="<query sentence>"') # how to get query from user
+args = parser.parse_args()
 
 
-def use_model(model, q):
-    # Could reverse design so that this function is main and camera is subprocess
-    # This way it is easier to access the results of model inference
-    boxes = []
-    print("child created")
-    # ws = websocket.WebSocket()
-    while True:
-        if not q.empty():
-            data = q.get()
-            if type(data) is str and data == "STOP":
-                return
-            # d = pytesseract.image_to_data(data, output_type=pytesseract.Output.DICT, config="--psm 11")
-            # n_boxes = len(d['level'])
-            # for i in range(n_boxes):
-            #     if d['conf'][i] == -1:
-            #         continue
-            #     print(d['text'][i])
-            
-            d = pytesseract.image_to_string(data, config="--psm 11")
-            print(d)
-            # for any model, this data d must go somewhere, but how?
-        else:
-            time.sleep(1)
-    
-    
+def generate_test():
+    '''
+    Basic example for accessing the stream of inferences from infer_stream
+    '''
+    for value in infer_stream():
+        print(value)
 
-# problem: call to the model is blocking, causing video to buffer
-
-def use_camera():
-    vid = cv.VideoCapture(0)
-    if not vid.isOpened():
-        print("Cannot open camera")
-        return
-    count = 0
-    boxes = []
-
-    # use this process to handle calling the model so that the main proc doesnt block
-    model = None
-    q = Queue()
-    proc = Process(target=use_model, args=(model, q))
+def infer_stream():
+    '''
+    Opens camera and streams frames to GPT4 for inference
+    '''
+    q = multiprocessing.Queue()
+    proc = multiprocessing.Process(name="use_camera", target=use_camera, args=[q])
     proc.start()
-    
+    try:
+        while proc.is_alive(): 
+            if not q.empty():
+                data = q.get()
 
-    ret, frame = vid.read()
-    while ret:
-        boxes = []
-        
-        count += 1
-        gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
-        ret, thresh = cv.threshold(gray, 0, 255, cv.THRESH_OTSU | cv.THRESH_BINARY_INV)
-        if count % 50 == 0:
-            q.put(thresh)
-    
-        # for x, y, w, h in boxes:
-        #     cv.rectangle(frame, (x, y), (x + w, y + h), (0,255,0), 2)
-        cv.imshow('frame', thresh)  
-        if cv.waitKey(1) & 0xFF == ord('q'):
-            break
-        # count += 1
-        ret, frame = vid.read()
-  
+                if type(data) is str and data == "STOP":
+                    break
+                inference = get_inference(data, 3243232, "")
+                yield inference
+            else:
+                time.sleep(1)
+    except Exception as e:
+        # Allowed to join child proc because child calls cancel_join_thread
+        proc.join()
+        proc.close()
+        raise e
 
-    vid.release()
-    q.put("STOP")
-    q.cancel_join_thread()
     proc.join()
     proc.close()
+    
+
+def simple_infer(chat_id: int, query = "") -> str:
+    '''
+    Get a single image from local camera and a summary from GPT4
+    Args:
+        chat_id - 
+        query - 
+    '''
+    print("Press q to capture image for inference") # indicate how to use
+    # frame = use_camera()
+    frame = None
+    out = get_inference(frame, chat_id, query)
+    return out
+    
+
+def use_camera(q = None) -> np.ndarray:
+    '''
+    Opens local camera for capture. Returns an ndarray image
+    Args:
+        q - Optional queue for sending frames to another process
+    '''
+    if type(q) is not multiprocessing.queues.Queue and q is not None:
+        raise Exception("q parameter has invalid type")
+    vid = cv.VideoCapture(0)
+    if not vid.isOpened():
+        raise Exception("Cannot open camera")
+    count = 0
+
+    try:
+        ret, frame = vid.read()
+        while not ret:
+            ret, frame = vid.read() # could this get stuck?
+
+        while ret: 
+            count += 1
+
+            if q and count % 200 == 0: # this might be more interesting if it triggered based on an event happening
+                q.put(frame)
+
+            cv.imshow('frame', frame)  
+            if cv.waitKey(1) & 0xFF == ord('q'):
+                break
+            ret, frame = vid.read()
+        if q:
+            # q.put(frame)
+            q.put("STOP")
+    except Exception as e:
+        q.cancel_join_thread()
+        raise e
+    vid.release()
+
+    if q:
+        q.cancel_join_thread()
+
+    if frame is None:
+        raise Exception("Unexpected disconnect from camera")
+
     cv.destroyAllWindows()
+    cv.waitKey(1)
+    return frame
 
+def get_inference(frame: np.ndarray, chat_id: int, query: str) -> str:
+    '''
+    Connects to websocket and gets an inference for frame
+    Args:
+        frame - Image to get inference from
+        chat_id - 
+        query - Optional question or comment to accompany the image for inference
+    '''
+    # I like the organization now because it is easy to understand
+    # However, each part isn't really usable by itself. For example, you wouldn't use send_image by itself
+    # Which makes me want to refactor
+    try:
+        url = "ws://172.21.1.104:18075/v1/public/generat"
+        ws = websocket.create_connection(url)
+        response = send_image(ws, frame, chat_id, query)
+        return response
+    except Exception as e:
+        return "failed to connect to inference server"
 
-def connect_ws():
-    # img = cv.imread("data/test-data.png")
+def send_image(ws, frame: np.ndarray, chat_id: int, query: str) -> str:
+    '''
+    Sends frame to websocket ws for inference. Returns the result of inference
+    Args:
+        ws - Websocket connection
+        frame - Image to send
+        chat_id - 
+        query - 
+    '''
+    img = Image.fromarray(frame)
 
-    # pil = Image.fromarray(img)
-    # pil_bytes = base64.b64encode(pil.tobytes())
-    # byte_arr = io.BytesIO()
-    # pil.save(byte_arr, format="PNG")
+    img_str = encode_image(img)
+    img_str = 'data:image/jpeg;base64,'+img_str
 
-    # pil_bytes = base64.b64encode(byte_arr.getvalue())
-    # # print(byte_arr.getvalue())
-    # # byte_arr = io.BytesIO(pil)
-    # b64_encoded_ascii = pil_bytes.decode("ascii")
-    # b64_encoded = pil_bytes.decode("utf-8")
-
-    with Image.open("data/test-data.png") as img:
-        img = img.convert('RGB')
-        img.thumbnail((512, 512))
-        byte_arr = io.BytesIO()
-        img.save(byte_arr, format="PNG")
-        img_str = base64.b64encode(byte_arr.getvalue()).decode("utf-8")
-        img_str = 'data:image/jpeg;base64,'+img_str
-
-
-    # with open("data/antiqueOliveStd.png", 'rb') as imgfile:
-    #     b64_bytes = base64.b64encode(imgfile.read())
-    #     b64_encoded = b64_bytes.decode('utf-8')
-    #     b64_encoded = 'data:image/jpeg;base64,' + b64_encoded
-
-    # Something about message is causing the websocket to error and close immediately
     message = {
-        "chat_id": "3243232",
-        # "query_text": "I submitted an image for inferrence. What is it?",
-        # "query_text": "If there is an error, please return it",
-        "query_text": "",
-        # "query_text": None,
+        "chat_id": chat_id, # dont want to always use the same id
+        "query_text": query, # might want to ask a specific question
         "model_name": "gpt4",
         "image_info": [img_str] 
     }
     message = json.dumps(message)
-    
-    def on_message(ws, message):
-        try:
-            # content = json.loads(message)
-            # print("CONTENT")
-            # print(content)
-            print("RECEIVED: " + message)
 
-            # byt = base64.b64decode(content["image_info"][0])
-            # print(byt)
-            # byte_arr = io.BytesIO(bytearray(byt))
-            # img = Image.open(byte_arr)
-            # print("processed image")
-            # cv.imshow("test", np.asarray(img))
-            # cv.waitKey(1)
-            
-        except Exception as e:
-            print(e)
-            print("RECEIVED: " + message)
+    ws.send(message)
+    output = ""
+    data = ws.recv()
+    while data:
+        output += data
+        data = ws.recv()
+    # slackbot handles the issue of recv -> disconnect by reconnecting after reading
+    return output
 
-
-    def on_error(ws, error):
-        print("ERROR: " + error)
-
-    def on_close(ws, close_status_code, close_msg):
-        print("CLOSED")
-        print(close_status_code)
-
-    def on_open(ws):
-        print("sending message")
-        ws.send(message)
-
-
-    url = "ws://172.21.1.104:18075/v1/public/generate"
-    ws = websocket.WebSocketApp(url, on_close=on_close, on_error=on_error, 
-                                on_open=on_open, on_message=on_message)
-    ws.run_forever()
-
-    # jsondict = json.loads(message)
-    # to_decode = jsondict["image_info"]
-
-    # to_decode.encode()
-    # for elt in to_decode:
-    #     decode_ascii = elt.encode("utf-8")
-    #     # print(decode_ascii)
-    #     # pil_byte = base64.b64decode(decode_ascii) # The invalid base64 error comes from here
-    #     pil_byte = base64.decodebytes(decode_ascii)
-
-    #     byte_arr = io.BytesIO(bytearray(pil_byte))
-    #     # base64.decode(to_decode, byte_arr)
-    #     img = Image.open(byte_arr)
-    #     cv.imshow("test", np.asarray(img))
-    #     cv.waitKey(0)
-
-    ws.close()
+def encode_image(img: Image) -> str:
+    '''
+    Returns img as a base64 encoded, utf8 string
+    '''
+    # Make sure image is in RGB
+    img = img.convert('RGB')
+    # Limit dimensions to (512, 512)
+    img.thumbnail((512, 512))
+    byte_arr = io.BytesIO()
+    img.save(byte_arr, format="PNG")
+    img_str = base64.b64encode(byte_arr.getvalue()).decode("utf-8")
+    return img_str
 
 
 def main():
     print("main")
-    # use_camera()
-    connect_ws()
+    if args.s:
+        # infer_stream()
+        generate_test()
+    else:
+        print(simple_infer(chat_id=3243232, query=args.query))
+    
 
 
 if __name__ == "__main__":

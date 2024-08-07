@@ -6,6 +6,7 @@ import cv2 as cv
 from datasets import load_dataset
 import random
 from functools import reduce
+import json
 
 
 def noise_image(img):
@@ -139,10 +140,38 @@ def get_split(dataset, count):
         labels.extend([label] * len(samples))
     return imgs, labels
 
+def remove_font(font):
+    with open('150_fonts.json', 'r') as f:
+        font_list = json.load(f)
+    new = {}
+    index = 0
+    for key in list(font_list.keys()):
+        if key == font:
+            continue
+        new[key] = index
+        index += 1
+    with open("149_fonts.json", "w") as f:
+        json.dump(new, f)
 
+def reverse_dict(filepath):
+    f = open(filepath, 'r')
+    with open(filepath, 'r') as f:
+        content = json.load(f)
+    # content = f.read().split()
+    reversed = {}
+    count = 0
+    for line in list(content.keys()):
+        reversed[str(count)] = line
+        count += 1
+    with open('149_fonts_backwards.json', 'w') as f:
+        json.dump(reversed, f, indent=4)
+
+    
 
 def main():
     print("main")
+    # remove_font("ExPontoPro")
+    reverse_dict("149_fonts.json")
     # imgs, _ = get_split("gaborcselle/font-examples", 2)
     # for img in imgs:
     #     cv.imshow("crop", img)

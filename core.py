@@ -9,6 +9,7 @@ from model import *
 import json
 from process_vfr import *
 from collections import defaultdict
+from heapq import nlargest
 
 pytesseract.pytesseract.tesseract_cmd = '/opt/homebrew/bin/tesseract'
 
@@ -21,7 +22,7 @@ parser.add_argument("-d", action='store_true', help="Dark mode. Use for light te
 parser.add_argument("-v", "--verbose", action='store_true')
 parser.add_argument("--filepath", type=str, default=None, help="Filepath to detect fonts. If none provided you will be prompted to take a picture")
 parser.add_argument("--top", type=int, default=3, help="Number of predictions to consider for each crop")
-parser.add_argument("--model", choices=['TFLite', 'Compact', 'Full'], default='Compact')
+parser.add_argument("--model", choices=['TFLite', 'Compact', 'Full', 'Checkpoint-50', 'Checkpoint-149'], default='Compact')
 parser.add_argument("--border", choices=['b', 'w', None], default=None)
 args = parser.parse_args()
 
@@ -131,6 +132,9 @@ def get_screenshot() -> np.ndarray:
 def get_preds(squares, model):
     '''
     Get the model's predictions for each crop
+    Args:
+        squares - 
+        model - 
     '''
     if model:
         out = model.call(np.array(squares))
@@ -183,11 +187,9 @@ def tess_boxes(img):
     Use tesseractOCR to detect bounding boxes for each word
     '''
     activation = cv.THRESH_BINARY if dark_mode else cv.THRESH_BINARY_INV
+    # Not sure if thresholding helps
     ret, thresh1 = cv.threshold(img, 0, 255, cv.THRESH_OTSU | activation)
-    cv.imshow("thresh1", thresh1)
-    cv.waitKey(0)
     d = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT, config="--psm 11")
-    # print(d)
     n_boxes = len(d['level'])
     boxes = []
     for i in range(n_boxes):
@@ -196,9 +198,6 @@ def tess_boxes(img):
             continue
         x, y, w, h = d['left'][i], d['top'][i], d['width'][i], d['height'][i]
         boxes.append((x, y, w, h))
-    #     cv.rectangle(img, (x, y), (x + w, y + h), (0,255,0), 2)
-    # cv.imshow("boxes", img)
-    # cv.waitKey(0)
     return boxes
 
 def dilate_boxes(img):
@@ -209,8 +208,8 @@ def dilate_boxes(img):
     activation = cv.THRESH_BINARY if dark_mode else cv.THRESH_BINARY_INV
 
     ret, thresh1 = cv.threshold(img, 0, 255, cv.THRESH_OTSU | activation)
-    cv.imshow("thresh", thresh1)
-    cv.waitKey(0)
+    # cv.imshow("thresh", thresh1)
+    # cv.waitKey(0)
     kernel_shape = (15, 11)
     rect_kernel = cv.getStructuringElement(cv.MORPH_RECT, kernel_shape) 
 
@@ -223,7 +222,7 @@ def dilate_boxes(img):
         boxes.append((x, y, w, h))
     return boxes
 
-def use_model(model, get_bounds, filepath=None, repeat=1):
+def use_model(model, get_bounds, topN:int, filepath=None, repeat=1):
     '''
     Run the font inferrence model
     '''
@@ -249,10 +248,10 @@ def use_model(model, get_bounds, filepath=None, repeat=1):
 
     im2 = thresh1.copy()
 
-    f = open('150_fonts_backwards.json')
+    f = open('utils/149_fonts_backwards.json')
     data = json.load(f)
+    counts = defaultdict(int)
     for x, y, w, h in contours:
-        counts = defaultdict(int)
 
         cropped = im2[y:y + h, x:x + w] 
 
@@ -273,9 +272,12 @@ def use_model(model, get_bounds, filepath=None, repeat=1):
                 continue
             for pred in preds:  
                 counts[data[str(pred)]] += 1
-        print(counts)
+    # get top n
+    return nlargest(topN, counts, key=counts.get)
 
-
+def load_checkpoint(model, ckpt):
+    checkpoint = tf.train.Checkpoint(model = model)
+    checkpoint.restore(ckpt).expect_partial()
 
 def main():
     if args.model == 'Full':
@@ -288,13 +290,27 @@ def main():
         model.call(np.ones((1,96,96,1)))
         model.load_weights("weights/model_weights_20_compact.weights.h5")
         model.call(np.ones((1,96,96,1)))
+    elif args.model == 'Checkpoint-50':
+        # 75% test accuracy
+        model = DeepFont(512, 50)
+        model.call(np.ones((1,96,96,1)))
+        load_checkpoint(model, "checkpoints_df/ckpt-55")
+        model.call(np.ones((1,96,96,1)))
+    elif args.model == 'Checkpoint-149':
+        # Currently about 78% test accuracy
+        model = DeepFont(512, 149)
+        model.call(np.ones((1,96,96,1)))
+        load_checkpoint(model, "checkpoints_df/ckpt-56")
+        model.call(np.ones((1,96,96,1)))
     else:
         model = None # this will activate the TFLite model
     
 
     filepath = args.filepath
     
-    use_model(model, get_bounds=tess_boxes, filepath=filepath, repeat=100)
+    res = use_model(model, get_bounds=tess_boxes, topN=3, filepath=filepath, repeat=100)
+
+    print(res)
     
 
 if __name__ == "__main__":

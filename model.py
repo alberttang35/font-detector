@@ -26,16 +26,14 @@ import keras
 #--------------------------------------------------------------------------------
 
 
-# try different models - one trained on single characters (for use in a character-by-character identifier)
-# another model trained on words, similar to DeepFont
 performance_dict = {}
 
 class DeepFont(Model):
-    def __init__(self, dense=128):
+    def __init__(self, dense=128, num_classes=20):
         super(DeepFont, self).__init__()
 
         self.batch_size = 128
-        self.num_classes = 20
+        self.num_classes = num_classes
         self.leaky_relu = tf.keras.layers.LeakyReLU(negative_slope=0.2)
 
         self.model = tf.keras.Sequential()
@@ -55,11 +53,11 @@ class DeepFont(Model):
         self.model.add(tf.keras.layers.Conv2D(256, kernel_size=(3,3), strides=(1,1), padding='same'))
 
         self.model.add(tf.keras.layers.Flatten())
-        self.model.add(tf.keras.layers.Dense(dense, activation=self.leaky_relu)) # 512
-        self.model.add(tf.keras.layers.Dense(dense, activation=self.leaky_relu)) # 512
+        self.model.add(tf.keras.layers.Dense(dense, activation=self.leaky_relu))
+        self.model.add(tf.keras.layers.Dropout(0.4))
+        self.model.add(tf.keras.layers.Dense(dense, activation=self.leaky_relu))
+        self.model.add(tf.keras.layers.Dropout(0.4))
         self.model.add(tf.keras.layers.Dense(self.num_classes, activation='softmax')) 
-
-        # self.optimizer = tf.keras.optimizers.Adam(learning_rate=0.001) # learning_rate = 0.01
 
 
     def call(self, inputs):
@@ -73,7 +71,7 @@ class DeepFont(Model):
     def total_accuracy(self, probs, labels):
         acc = 0
         top_five = np.argsort(probs, axis=1)
-        top_five = np.array(top_five).reshape((self.batch_size, 150))
+        top_five = np.array(top_five).reshape((self.batch_size, self.num_classes))
         top_five = top_five[:, -1:]
 
         for i in range(len(labels)):
